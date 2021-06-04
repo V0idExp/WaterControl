@@ -1,14 +1,22 @@
 #include <EncButton.h>
 #include <FastIO.h>
-
-// include the library code:
 #include <LiquidCrystal.h>
 
-// initialize the library by associating any needed LCD interface pin
-// with the arduino pin number it is connected to
-const int rs = 12, en = 11, d4 = 5, d5 = 4, d6 = 3, d7 = 2;
-LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
-EncButton<EB_TICK, 10, 9, 7> enc;
+
+// Time constants in seconds
+#define SECOND 1UL
+#define MINUTE (60UL * SECOND)
+#define HOUR (MINUTE * 60UL)
+#define DAY (HOUR * 24UL)
+
+
+// Custom characters, used as widget icons
+#define CLOCK_CHR byte(1)
+#define DROP_CHR byte(2)
+#define WATCH_CHR byte(3)
+#define VALVE_CHR byte(4)
+#define WATER_CHR byte(5)
+#define STOP_CHR byte(6)
 
 uint8_t clock_char[] = {
 	0x0, 0x0, 0xe, 0x15, 0x17, 0x11, 0xe, 0x0
@@ -34,42 +42,39 @@ uint8_t water_stop_char[] = {
 	0x7, 0x4, 0xe, 0x1f, 0x0, 0x0, 0x0, 0x0
 };
 
-#define CLOCK_CHR byte(1)
-#define DROP_CHR byte(2)
-#define WATCH_CHR byte(3)
-#define VALVE_CHR byte(4)
-#define WATER_CHR byte(5)
-#define STOP_CHR byte(6)
 
-#define SECOND 1UL
-#define MINUTE (60UL * SECOND)
-#define HOUR (MINUTE * 60UL)
-#define DAY (HOUR * 24UL)
-
-
-static unsigned long thresholds[] = { DAY, HOUR, MINUTE, SECOND };
-
-static const char *label_feed = "feed";
-static const char *label_stop = "stop";
-
+// Feed control vars
 unsigned long feed_period = 1 * MINUTE + SECOND;
 unsigned long feed_countdown = feed_period;
 unsigned long feed_intensity = 75;
 unsigned long feed_duration = 50;
 bool feed_active = false;
 
-// time vars
+
+// Time vars
 unsigned long last_update = 0, now, dt, elapsed_seconds, total_seconds = 0;
 
-char buf[16] = {0};
 
-void format_duration(char *dst, unsigned long value);
-void format_percentile(char *dst, unsigned long value);
+// Thresholds for time field widgets
+static unsigned long thresholds[] = { DAY, HOUR, MINUTE, SECOND };
 
-void set_duration(unsigned long *current, int increment);
-void set_number(unsigned long *current, int increment);
 
-void toggle_feed();
+// LCD interface
+const int rs = 7, en = 6, d4 = 5, d5 = 4, d6 = 3, d7 = 2;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+
+// Encoder interface
+EncButton<EB_TICK, 12, 11, 13> enc;
+
+
+// PWM pin
+const int pwm = 10;
+
+
+// Button labels
+static const char *label_feed = "Feed";
+static const char *label_stop = "Stop";
 
 struct Widget
 {
@@ -79,8 +84,8 @@ struct Widget
 		BUTTON
 	} type;
 
-	unsigned int col;
-	unsigned int row;
+	unsigned col;
+	unsigned row;
 
 	byte icon;
 
@@ -92,13 +97,13 @@ struct Widget
 			unsigned long min;
 			unsigned long max;
 			void (*formatter)(char *dst, unsigned long value);
-			void (*setter)(unsigned long *current, int increment);
+			void (*setter)(Widget &w, int increment);
 		} field;
 
 		struct Button
 		{
 			const char *label;
-			void (*handler)();
+			void (*handler)(Widget &w);
 		} button;
 	};
 };
@@ -113,6 +118,13 @@ struct UI
 	} state = SELECT;
 	unsigned selected = 0;
 } ui;
+
+
+void format_duration(char *dst, unsigned long value);
+void format_percentile(char *dst, unsigned long value);
+void set_duration(Widget &w, int increment);
+void set_pwm(Widget &w, int increment);
+void toggle_feed(Widget &w);
 
 
 static Widget widgets[] = {
@@ -154,12 +166,11 @@ static Widget widgets[] = {
 		5,
 		1,
 		VALVE_CHR,
-		{.field={&feed_intensity, 20, 99, format_percentile, set_number}},
+		{.field={&feed_intensity, 0, 99, format_percentile, set_pwm}},
 	},
 };
 
 #define WIDGETS_COUNT (sizeof(widgets) / sizeof(Widget))
-#define TOGGLE_FEED_BUTTON 2
 
 
 void setup()
@@ -178,21 +189,23 @@ void setup()
 
 	last_update = millis();
 
-	pinMode(8, OUTPUT);
+	// set up a 15.6 kHz PWM signal
+	pinMode(pwm, OUTPUT);
+	TCCR1A = 0b00000011;  // 10bit
+	TCCR1B = 0b00001001;  // x1 fast pwm
 
 	update_ui();
 }
 
 void update_ui()
 {
-
 	lcd.clear();
 
 	for (int i = 0; i < WIDGETS_COUNT; i++)
 	{
-		Widget *w = &widgets[i];
+		Widget &w = widgets[i];
 
-		lcd.setCursor(w->col, w->row);
+		lcd.setCursor(w.col, w.row);
 
 		if (ui.state == UI::SELECT)
 		{
@@ -207,17 +220,17 @@ void update_ui()
 			lcd.print(' ');
 		}
 
-		lcd.write(w->icon);
+		lcd.write(w.icon);
 
-		if (w->type == Widget::Type::FIELD)
+		if (w.type == Widget::Type::FIELD)
 		{
 			char buf[4] = {0};
-			w->field.formatter(buf, *(w->field.value));
+			w.field.formatter(buf, *(w.field.value));
 			lcd.print(buf);
 		}
-		else if (w->type == Widget::Type::BUTTON)
+		else if (w.type == Widget::Type::BUTTON)
 		{
-			lcd.print(w->button.label);
+			lcd.print(w.button.label);
 		}
 	}
 }
@@ -286,16 +299,16 @@ void loop()
 
 		if (enc.isClick())
 		{
+			Widget &w = widgets[ui.selected];
 			should_update = true;
-			switch (widgets[ui.selected].type)
+			switch (w.type)
 			{
 				case Widget::Type::FIELD:
 					ui.state = UI::EDIT;
 					enc.counter = 0;
 					break;
 				case Widget::Type::BUTTON:
-					widgets[ui.selected].button.handler();
-					break;
+					w.button.handler(w);
 			}
 		}
 
@@ -309,16 +322,14 @@ void loop()
 	{
 		if (enc.isTurn())
 		{
-			Widget::Field *f = &widgets[ui.selected].field;
+			Widget &w = widgets[ui.selected];
 			int increment = (enc.isLeft() ? -1 : 1) * (enc.isFast() ? 5 : 1);
 
-			unsigned long value = *f->value;
-			f->setter(&value, increment);
-			value = constrain(value, f->min, f->max);
+			unsigned long value = *(w.field.value);
+			w.field.setter(w, increment);
 
-			if (value != *f->value)
+			if (value != *(w.field.value))
 			{
-				*f->value = value;
 				should_update = true;
 			}
 		}
@@ -353,54 +364,57 @@ void format_duration(char *dst, unsigned long value)
 	}
 }
 
-void set_duration(unsigned long *current, int increment)
+void set_duration(Widget &w, int increment)
 {
+	unsigned long value = *w.field.value;
 	int i;
 	for (i = 0; i < 4; i++)
 	{
-		if (*current >= thresholds[i])
+		if (value >= thresholds[i])
 		{
 			break;
 		}
 	}
 
 	unsigned long threshold = thresholds[i];
-	unsigned long new_val = *current + increment * threshold;
+	unsigned long new_val = value + increment * threshold;
 
 	// trim the the value to a multiple of threshold
-	*current -= *current % threshold;
+	value -= value % threshold;
 
 	if (increment < 0)
 	{
-		if (new_val < threshold || new_val > *current)
+		if (new_val < threshold || new_val > value)
 		{
 			// the decrement is bigger than the value or an underflow occurred,
 			// subtract the next lower threshold
-			*current = threshold - (i < 3 ? thresholds[i + 1] : 1);
+			value = threshold - (i < 3 ? thresholds[i + 1] : 1);
 		}
 		else
 		{
-			*current = new_val;
+			value = new_val;
 		}
 	}
 	else
 	{
-		if (new_val < *current)
+		if (new_val < value)
 		{
 			// overflow; make the value a maximum multiple of threshold that can
 			// be fit into an unsigned long
-			*current = -1UL - (-1UL % threshold);
+			value = -1UL - (-1UL % threshold);
 		}
 		else if (i > 0 && new_val >= thresholds[i - 1])
 		{
 			// next threshold reached
-			*current = thresholds[i - 1];
+			value = thresholds[i - 1];
 		}
 		else
 		{
-			*current = new_val;
+			value = new_val;
 		}
 	}
+
+	*(w.field.value) = constrain(value, w.field.min, w.field.max);
 }
 
 void format_percentile(char *dst, unsigned long value)
@@ -408,16 +422,40 @@ void format_percentile(char *dst, unsigned long value)
 	snprintf(dst, 4, "%02lu%%", value);
 }
 
-void set_number(unsigned long *current, int increment)
+void set_pwm(Widget &w, int increment)
 {
-	*current += increment;
+	unsigned long v = *(w.field.value);
+	if (increment < 0 && v + increment > v)
+	{
+		// underflow
+		v = 0;
+	}
+	else if (increment > 0 && v + increment < v)
+	{
+		// overflow
+		v = -1UL;
+	}
+	else
+	{
+		v += increment;
+	}
+
+	*(w.field.value) = constrain(v, w.field.min, w.field.max);
+
+	update_pwm();
 }
 
-void toggle_feed()
+void update_pwm()
+{
+	analogWrite(pwm, feed_active * (feed_intensity / 100.0) * 1024);
+}
+
+void toggle_feed(Widget &w)
 {
 	feed_active = !feed_active;
-	digitalWrite(8, feed_active);
-	Widget &w = widgets[TOGGLE_FEED_BUTTON];
+
 	w.icon = feed_active ? STOP_CHR : WATER_CHR;
 	w.button.label = feed_active ? label_stop : label_feed;
+
+	update_pwm();
 }
