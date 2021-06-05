@@ -18,6 +18,7 @@
 #define VALVE_CHR byte(4)
 #define WATER_CHR byte(5)
 #define STOP_CHR byte(6)
+#define FILL_CHR byte(7)
 
 uint8_t clock_char[] = {
 	0x0, 0x0, 0xe, 0x15, 0x17, 0x11, 0xe, 0x0
@@ -43,13 +44,18 @@ uint8_t water_stop_char[] = {
 	0x7, 0x4, 0xe, 0x1f, 0x0, 0x0, 0x0, 0x0
 };
 
+uint8_t water_tank_char[] = {
+	0xe, 0x11, 0x1f, 0x1f, 0x1f, 0x1f, 0xe, 0x0
+};
+
 
 // Feed control vars
-unsigned long feed_period = 12 * HOUR;
+unsigned long feed_period = 1 * MINUTE;
 unsigned long feed_countdown = feed_period;
-unsigned long feed_duration = 2 * MINUTE;
-unsigned long feed_intensity = 50;
+unsigned long feed_duration = 7 * SECOND;
+unsigned long feed_intensity = 33;
 bool feed_active = false;
+bool tank_empty = false;
 
 
 // EEPROM indices for saving vars
@@ -84,10 +90,13 @@ EncButton<EB_TICK, 12, 11, 13> enc;
 // PWM pin
 const int pwm = 10;
 
+// Water sensor pin
+const int sensor = 8;
 
 // Button labels
 static const char *label_feed = "Feed";
 static const char *label_stop = "Stop";
+static const char *label_fill = "Fill";
 
 struct Widget
 {
@@ -140,6 +149,7 @@ void set_pwm(Widget &w, int increment);
 void toggle_feed(Widget &w);
 void toggle_feed(Widget &w);
 void update_feed(unsigned dt);
+void check_sensor();
 
 
 static Widget widgets[] = {
@@ -208,6 +218,7 @@ void setup()
 	lcd.createChar(VALVE_CHR, valve_char);
 	lcd.createChar(WATER_CHR, water_char);
 	lcd.createChar(STOP_CHR, water_stop_char);
+	lcd.createChar(FILL_CHR, water_tank_char);
 
 	last_update = millis();
 
@@ -216,6 +227,8 @@ void setup()
 	TCCR1A = 0b00000011;  // 10bit
 	TCCR1B = 0b00001001;  // x1 fast pwm
 
+	pinMode(sensor, INPUT);
+
 	update_ui();
 }
 
@@ -223,6 +236,21 @@ void setup()
 void update_ui()
 {
 	lcd.clear();
+
+	// feed button update
+	if (tank_empty)
+	{
+		feed_button_widget.icon = FILL_CHR;
+		feed_button_widget.button.label = label_fill;
+
+		lcd.setCursor(11, 1);
+		lcd.print("water");
+	}
+	else
+	{
+		feed_button_widget.icon = feed_active ? STOP_CHR : WATER_CHR;
+		feed_button_widget.button.label = feed_active ? label_stop : label_feed;
+	}
 
 	for (int i = 0; i < WIDGETS_COUNT; i++)
 	{
@@ -282,6 +310,15 @@ void loop()
 	tick_time();
 
 	bool should_update = elapsed_seconds > 0;
+
+	// check the water level sensor
+	// note: the condition is reset only manually
+	if (!tank_empty && digitalRead(sensor))
+	{
+		tank_empty = true;
+		should_update = true;
+	}
+
 	update_feed(elapsed_seconds);
 
 	if (ui.state == UI::SELECT)
@@ -465,47 +502,53 @@ void set_pwm(Widget &w, int increment)
 
 void toggle_feed(Widget &w)
 {
-	// just zero the countdown and call the feed update function
-	feed_countdown = 0;
-	update_feed(0);
+	if (tank_empty)
+	{
+		tank_empty = digitalRead(sensor);
+	}
+	else
+	{
+		// just zero the countdown and call the feed update function
+		feed_countdown = 0;
+		update_feed(0);
+	}
 }
 
 
 void update_pwm()
 {
-	analogWrite(pwm, feed_active * (feed_intensity / 100.0) * 1024);
+	analogWrite(pwm, (feed_active && !tank_empty) * (feed_intensity / 100.0) * 1024);
 }
 
 
 void update_feed(unsigned dt)
 {
-	if (feed_countdown > dt)
+	if (!tank_empty)
 	{
-		// some time still left
-		feed_countdown -= dt;
-	}
-	else
-	{
-		// countdown finished
-
-		if (feed_active)
+		if (feed_countdown > dt)
 		{
-			// feeding finished, stop and switch to countdown
-			feed_countdown = feed_period;
+			// some time still left
+			feed_countdown -= dt;
 		}
 		else
 		{
-			// countdown finished, start feeding
-			feed_countdown = feed_duration;
+			// countdown finished
+
+			if (feed_active)
+			{
+				// feeding finished, stop and switch to countdown
+				feed_countdown = feed_period;
+			}
+			else
+			{
+				// countdown finished, start feeding
+				feed_countdown = feed_duration;
+			}
+			feed_active = !feed_active;
 		}
-		feed_active = !feed_active;
-
-		update_pwm();
-
-		// update the button widget
-		feed_button_widget.icon = feed_active ? STOP_CHR : WATER_CHR;
-		feed_button_widget.button.label = feed_active ? label_stop : label_feed;
 	}
+
+	update_pwm();
 }
 
 void save_values_to_eeprom()
