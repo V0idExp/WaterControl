@@ -1,3 +1,4 @@
+#include <EEPROM.h>
 #include <EncButton.h>
 #include <FastIO.h>
 #include <LiquidCrystal.h>
@@ -44,11 +45,23 @@ uint8_t water_stop_char[] = {
 
 
 // Feed control vars
-unsigned long feed_period = 1 * MINUTE + SECOND;
+unsigned long feed_period = 12 * HOUR;
 unsigned long feed_countdown = feed_period;
-unsigned long feed_intensity = 75;
-unsigned long feed_duration = 50;
+unsigned long feed_duration = 2 * MINUTE;
+unsigned long feed_intensity = 50;
 bool feed_active = false;
+
+
+// EEPROM indices for saving vars
+struct EEStore
+{
+	int magic;
+	unsigned long feed_period;
+	unsigned long feed_intensity;
+	unsigned long feed_duration;
+};
+
+#define EEMAGIC 0xbee
 
 
 // Time vars
@@ -125,6 +138,8 @@ void format_percentile(char *dst, unsigned long value);
 void set_duration(Widget &w, int increment);
 void set_pwm(Widget &w, int increment);
 void toggle_feed(Widget &w);
+void toggle_feed(Widget &w);
+void update_feed(unsigned dt);
 
 
 static Widget widgets[] = {
@@ -142,7 +157,7 @@ static Widget widgets[] = {
 		5,
 		0,
 		DROP_CHR,
-		{.field={&feed_duration, 1, 60, format_duration, set_duration}},
+		{.field={&feed_duration, 1, HOUR, format_duration, set_duration}},
 	},
 	// Feed toggle button
 	{
@@ -158,7 +173,7 @@ static Widget widgets[] = {
 		0,
 		1,
 		WATCH_CHR,
-		{.field={&feed_countdown, 1, 99, format_duration, set_duration}},
+		{.field={&feed_countdown, 1, 31 * DAY, format_duration, set_duration}},
 	},
 	// Feed intensity
 	{
@@ -173,9 +188,16 @@ static Widget widgets[] = {
 #define WIDGETS_COUNT (sizeof(widgets) / sizeof(Widget))
 
 
+Widget &feed_button_widget = widgets[2];
+Widget &feed_countdown_widget = widgets[3];
+
+
 void setup()
 {
 	// Serial.begin(9600);
+
+	// load the last feed settings from the EEPROM
+	load_values_from_eeprom();
 
 	// set up the LCD's number of columns and rows:
 	lcd.begin(16, 2);
@@ -196,6 +218,7 @@ void setup()
 
 	update_ui();
 }
+
 
 void update_ui()
 {
@@ -235,6 +258,7 @@ void update_ui()
 	}
 }
 
+
 void tick_time() {
 	// compute time delta since last tick in milliseconds, accounting for overflow
 	now = millis();
@@ -251,26 +275,14 @@ void tick_time() {
 	total_seconds += elapsed_seconds;
 }
 
+
 void loop()
 {
 	enc.tick();
 	tick_time();
 
-	bool should_update = false;
-
-	if (elapsed_seconds > 0)
-	{
-		if (feed_countdown >= elapsed_seconds)
-		{
-			feed_countdown -= elapsed_seconds;
-			should_update = true;
-		}
-		else
-		{
-			feed_countdown = feed_period;
-			should_update = true;
-		}
-	}
+	bool should_update = elapsed_seconds > 0;
+	update_feed(elapsed_seconds);
 
 	if (ui.state == UI::SELECT)
 	{
@@ -338,6 +350,8 @@ void loop()
 		{
 			ui.state = UI::SELECT;
 			should_update = true;
+			// TODO: uncomment this in production!
+			// save_values_to_eeprom();
 		}
 	}
 
@@ -357,12 +371,13 @@ void format_duration(char *dst, unsigned long value)
 	{
 		if (value >= thresholds[i])
 		{
-			value = value / thresholds[i];
+			value = ceil(value / (double)thresholds[i]);
 			snprintf(dst, 4, "%02lu%c", value, units[i]);
 			break;
 		}
 	}
 }
+
 
 void set_duration(Widget &w, int increment)
 {
@@ -417,10 +432,12 @@ void set_duration(Widget &w, int increment)
 	*(w.field.value) = constrain(value, w.field.min, w.field.max);
 }
 
+
 void format_percentile(char *dst, unsigned long value)
 {
 	snprintf(dst, 4, "%02lu%%", value);
 }
+
 
 void set_pwm(Widget &w, int increment)
 {
@@ -445,17 +462,72 @@ void set_pwm(Widget &w, int increment)
 	update_pwm();
 }
 
+
+void toggle_feed(Widget &w)
+{
+	// just zero the countdown and call the feed update function
+	feed_countdown = 0;
+	update_feed(0);
+}
+
+
 void update_pwm()
 {
 	analogWrite(pwm, feed_active * (feed_intensity / 100.0) * 1024);
 }
 
-void toggle_feed(Widget &w)
+
+void update_feed(unsigned dt)
 {
-	feed_active = !feed_active;
+	if (feed_countdown > dt)
+	{
+		// some time still left
+		feed_countdown -= dt;
+	}
+	else
+	{
+		// countdown finished
 
-	w.icon = feed_active ? STOP_CHR : WATER_CHR;
-	w.button.label = feed_active ? label_stop : label_feed;
+		if (feed_active)
+		{
+			// feeding finished, stop and switch to countdown
+			feed_countdown = feed_period;
+		}
+		else
+		{
+			// countdown finished, start feeding
+			feed_countdown = feed_duration;
+		}
+		feed_active = !feed_active;
 
-	update_pwm();
+		update_pwm();
+
+		// update the button widget
+		feed_button_widget.icon = feed_active ? STOP_CHR : WATER_CHR;
+		feed_button_widget.button.label = feed_active ? label_stop : label_feed;
+	}
+}
+
+void save_values_to_eeprom()
+{
+	EEStore ee = {
+		.magic = EEMAGIC,
+		.feed_period = feed_period,
+		.feed_intensity = feed_intensity,
+		.feed_duration = feed_duration,
+	};
+	EEPROM.put(0, ee);
+}
+
+void load_values_from_eeprom()
+{
+	// load the values only if if the magic signature is present
+	EEStore ee;
+	EEPROM.get(0, ee);
+	if (ee.magic == EEMAGIC)
+	{
+		feed_period = feed_countdown = ee.feed_period;
+		feed_duration = ee.feed_duration;
+		feed_intensity = ee.feed_intensity;
+	}
 }
