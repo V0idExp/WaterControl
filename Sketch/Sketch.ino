@@ -1,6 +1,6 @@
+#include <LCD_I2C.h>
 #include <EEPROM.h>
 #include <EncButton.h>
-#include <LiquidCrystal_I2C.h>
 
 // Time constants in seconds
 #define SECOND 1UL
@@ -73,7 +73,7 @@ unsigned long last_update = 0, now, dt, elapsed_seconds, total_seconds = 0;
 static unsigned long thresholds[] = { DAY, HOUR, MINUTE, SECOND };
 
 // LCD interface
-LiquidCrystal_I2C lcd(0x17, 16, 2);
+LCD_I2C lcd(0x27, 16, 2);
 
 // Encoder interface
 EncButton<EB_TICK, 12, 11, 13> enc;
@@ -193,11 +193,12 @@ void setup()
 	// Serial.begin(9600);
 
 	// load the last feed settings from the EEPROM
-	load_values_from_eeprom();
+	// load_values_from_eeprom();
 
 	// set up the LCD's number of columns and rows:
-	lcd.begin(16, 2);
-	lcd.display();
+	lcd.begin();
+	lcd.backlight();
+
 	lcd.createChar(CLOCK_CHR, clock_char);
 	lcd.createChar(DROP_CHR, drop_char);
 	lcd.createChar(WATCH_CHR, stopwatch_char);
@@ -205,7 +206,6 @@ void setup()
 	lcd.createChar(WATER_CHR, water_char);
 	lcd.createChar(STOP_CHR, water_stop_char);
 	lcd.createChar(FILL_CHR, water_tank_char);
-
 	last_update = millis();
 
 	// set up a 15.6 kHz PWM signal
