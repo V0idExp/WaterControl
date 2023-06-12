@@ -1,10 +1,6 @@
 #include <EEPROM.h>
 #include <EncButton.h>
-#include <FastIO.h>
-#include <SPI.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <LiquidCrystal_I2C.h>
 
 // Time constants in seconds
 #define SECOND 1UL
@@ -12,34 +8,43 @@
 #define HOUR (MINUTE * 60UL)
 #define DAY (HOUR * 24UL)
 
-#define SCREEN_WIDTH 128    // OLED display width, in pixels
-#define SCREEN_HEIGHT 64    // OLED display height, in pixels
-#define OLED_RESET -1       // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3c // I2C address of the module
+// Custom characters, used as widget icons
+#define CLOCK_CHR byte(1)
+#define DROP_CHR byte(2)
+#define WATCH_CHR byte(3)
+#define VALVE_CHR byte(4)
+#define WATER_CHR byte(5)
+#define STOP_CHR byte(6)
+#define FILL_CHR byte(7)
 
-#define CHAR_HEIGHT 8
-#define CHAR_WIDTH 8
+uint8_t clock_char[] = {
+	0x0, 0x0, 0xe, 0x15, 0x17, 0x11, 0xe, 0x0
+};
 
-static const uint8_t period_icon[] = {
-	0x0, 0x0, 0x70, 0xa8, 0xb8, 0x88, 0x70, 0x0};
+uint8_t drop_char[] = {
+	0x0, 0x0, 0x4, 0xe, 0x1f, 0x1f, 0xe, 0x0
+};
 
-static const uint8_t duration_icon[] = {
-	0x0, 0x0, 0x20, 0x70, 0xf8, 0xf8, 0x70, 0x0};
+uint8_t stopwatch_char[] = {
+	0xe, 0x4, 0xe, 0x11, 0x15, 0x19, 0xe, 0x0
+};
 
-static const uint8_t countdown_icon[] = {
-	0x70, 0x20, 0x70, 0x88, 0xa8, 0xc8, 0x70, 0x0};
+uint8_t valve_char[] = {
+	0x0, 0x0, 0xe, 0x4, 0x1f, 0x1f, 0x18, 0x0
+};
 
-static const uint8_t intensity_icon[] = {
-	0x0, 0x0, 0x70, 0x20, 0xf8, 0xf8, 0xc0, 0x0};
+uint8_t water_char[] = {
+	0x7, 0x4, 0xe, 0x1f, 0x0, 0x15, 0x15, 0x0
+};
 
-static const uint8_t feed_icon[] = {
-	0x38, 0x20, 0x70, 0xf8, 0x0, 0xa8, 0xa8, 0x0};
+uint8_t water_stop_char[] = {
+	0x7, 0x4, 0xe, 0x1f, 0x0, 0x0, 0x0, 0x0
+};
 
-static const uint8_t feed_stop_char[] = {
-	0x38, 0x20, 0x70, 0xf8, 0x0, 0x0, 0x0, 0x0};
+uint8_t water_tank_char[] = {
+	0xe, 0x11, 0x1f, 0x1f, 0x1f, 0x1f, 0xe, 0x0
+};
 
-static const uint8_t tank_icon[] = {
-	0x70, 0x88, 0xf8, 0xf8, 0xf8, 0xf8, 0x70, 0x0};
 
 // Feed control vars
 unsigned long feed_period = 1 * MINUTE;
@@ -65,19 +70,19 @@ struct EEStore
 unsigned long last_update = 0, now, dt, elapsed_seconds, total_seconds = 0;
 
 // Thresholds for time field widgets
-static unsigned long thresholds[] = {DAY, HOUR, MINUTE, SECOND};
+static unsigned long thresholds[] = { DAY, HOUR, MINUTE, SECOND };
 
-// Encoder object
-EncButton<EB_TICK, 2, 3, 4> enc;
+// LCD interface
+LiquidCrystal_I2C lcd(0x17, 16, 2);
 
-// Display object
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+// Encoder interface
+EncButton<EB_TICK, 12, 11, 13> enc;
 
 // PWM pin
 const int pwm = 10;
 
 // Water sensor pin
-const int sensor = 1;
+const int sensor = 8;
 
 // Button labels
 static const char *label_feed = "Feed";
@@ -95,7 +100,7 @@ struct Widget
 	unsigned col;
 	unsigned row;
 
-	uint8_t const *icon;
+	byte icon;
 
 	union
 	{
@@ -141,23 +146,23 @@ static Widget widgets[] = {
 		Widget::Type::FIELD,
 		0,
 		0,
-		period_icon,
-		{.field = {&feed_period, 1, 31 * DAY, format_duration, set_duration}},
+		CLOCK_CHR,
+		{.field={&feed_period, 1, 31 * DAY, format_duration, set_duration}},
 	},
 	// Feed duration
 	{
 		Widget::Type::FIELD,
 		5,
 		0,
-		duration_icon,
-		{.field = {&feed_duration, 1, HOUR, format_duration, set_duration}},
+		DROP_CHR,
+		{.field={&feed_duration, 1, HOUR, format_duration, set_duration}},
 	},
 	// Feed toggle button
 	{
 		Widget::Type::BUTTON,
 		10,
 		0,
-		feed_icon,
+		WATER_CHR,
 		{.button = {label_feed, toggle_feed}},
 	},
 	// Feed countdown
@@ -165,16 +170,16 @@ static Widget widgets[] = {
 		Widget::Type::FIELD,
 		0,
 		1,
-		countdown_icon,
-		{.field = {&feed_countdown, 1, 31 * DAY, format_duration, set_duration}},
+		WATCH_CHR,
+		{.field={&feed_countdown, 1, 31 * DAY, format_duration, set_duration}},
 	},
 	// Feed intensity
 	{
 		Widget::Type::FIELD,
 		5,
 		1,
-		intensity_icon,
-		{.field = {&feed_intensity, 0, 99, format_percentile, set_pwm}},
+		VALVE_CHR,
+		{.field={&feed_intensity, 0, 99, format_percentile, set_pwm}},
 	},
 };
 
@@ -187,24 +192,19 @@ void setup()
 {
 	// Serial.begin(9600);
 
-	// SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-	if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS))
-	{
-		Serial.println(F("SSD1306 allocation failed"));
-		for (;;)
-			; // Don't proceed, loop forever
-	}
-
-	// Show initial display buffer contents on the screen --
-	// the library initializes this with an Adafruit splash screen.
-	display.display();
-	delay(2000); // Pause for 2 seconds
-
-	// Clear the buffer
-	display.clearDisplay();
-
 	// load the last feed settings from the EEPROM
 	load_values_from_eeprom();
+
+	// set up the LCD's number of columns and rows:
+	lcd.begin(16, 2);
+	lcd.display();
+	lcd.createChar(CLOCK_CHR, clock_char);
+	lcd.createChar(DROP_CHR, drop_char);
+	lcd.createChar(WATCH_CHR, stopwatch_char);
+	lcd.createChar(VALVE_CHR, valve_char);
+	lcd.createChar(WATER_CHR, water_char);
+	lcd.createChar(STOP_CHR, water_stop_char);
+	lcd.createChar(FILL_CHR, water_tank_char);
 
 	last_update = millis();
 
@@ -215,33 +215,26 @@ void setup()
 
 	pinMode(sensor, INPUT);
 
-	attachInterrupt(0, isr, CHANGE); // D2
-	attachInterrupt(1, isr, CHANGE); // D3
-
 	update_ui();
 }
 
-void isr()
-{
-	enc.tick();
-}
 
 void update_ui()
 {
-	display.clearDisplay();
-	display.setTextSize(1);				 // Normal 1:1 pixel scale
-	display.setTextColor(SSD1306_WHITE); // Draw white text
-	display.setCursor(0, 0);			 // Start at top-left corner
+	lcd.clear();
 
 	// feed button update
 	if (tank_empty)
 	{
-		feed_button_widget.icon = tank_icon;
+		feed_button_widget.icon = FILL_CHR;
 		feed_button_widget.button.label = label_fill;
+
+		lcd.setCursor(11, 1);
+		lcd.print("water");
 	}
 	else
 	{
-		feed_button_widget.icon = feed_active ? feed_stop_char : feed_icon;
+		feed_button_widget.icon = feed_active ? STOP_CHR : WATER_CHR;
 		feed_button_widget.button.label = feed_active ? label_stop : label_feed;
 	}
 
@@ -249,39 +242,36 @@ void update_ui()
 	{
 		Widget &w = widgets[i];
 
-		display.setCursor(w.col * 8, w.row * 8);
+		lcd.setCursor(w.col, w.row);
 
 		if (ui.state == UI::SELECT)
 		{
-			display.print(i == ui.selected ? '>' : ' ');
+			lcd.print(i == ui.selected ? '>' : ' ');
 		}
 		else if (ui.state == UI::EDIT)
 		{
-			display.print(i == ui.selected ? '=' : ' ');
+			lcd.print(i == ui.selected ? '=' : ' ');
 		}
 		else
 		{
-			display.print(' ');
+			lcd.print(' ');
 		}
 
-		auto cur_x = display.getCursorX(), cur_y = display.getCursorY();
-		display.drawBitmap(cur_x, cur_y, (uint8_t *)w.icon, CHAR_WIDTH, CHAR_HEIGHT, SSD1306_WHITE);
-		display.setCursor(cur_x + CHAR_WIDTH, cur_y);
+		lcd.write(w.icon);
 
 		if (w.type == Widget::Type::FIELD)
 		{
 			char buf[4] = {0};
 			w.field.formatter(buf, *(w.field.value));
-			display.print(buf);
+			lcd.print(buf);
 		}
 		else if (w.type == Widget::Type::BUTTON)
 		{
-			display.print(w.button.label);
+			lcd.print(w.button.label);
 		}
 	}
-
-	display.display();
 }
+
 
 void tick_time()
 {
@@ -350,12 +340,12 @@ void loop()
 			should_update = true;
 			switch (w.type)
 			{
-			case Widget::Type::FIELD:
-				ui.state = UI::EDIT;
-				enc.counter = 0;
-				break;
-			case Widget::Type::BUTTON:
-				w.button.handler(w);
+				case Widget::Type::FIELD:
+					ui.state = UI::EDIT;
+					enc.counter = 0;
+					break;
+				case Widget::Type::BUTTON:
+					w.button.handler(w);
 			}
 		}
 
