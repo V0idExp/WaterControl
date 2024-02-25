@@ -9,7 +9,7 @@
 #define DAY (HOUR * 24UL)
 
 // Backlight timeout
-#define BACKLIGHT_TIMEOUT (MINUTE * 2)
+#define BACKLIGHT_TIMEOUT (SECOND * 30)
 
 // Custom characters, used as widget icons
 #define CLOCK_CHR byte(1)
@@ -313,7 +313,7 @@ void loop()
 	tick_time();
 
 	bool should_update = elapsed_seconds > 0;
-	bool turn_backlight_on = enc.isTurn() || enc.isClick();
+	bool turn_backlight_on = false;
 
 	// check the water level sensor
 	// note: the condition is reset only manually
@@ -337,6 +337,8 @@ void loop()
 			{
 				ui.selected--;
 			}
+
+			turn_backlight_on = true;
 		}
 		else if (enc.isRight())
 		{
@@ -348,6 +350,8 @@ void loop()
 			{
 				ui.selected++;
 			}
+
+			turn_backlight_on = true;
 		}
 
 		if (enc.isClick())
@@ -363,6 +367,8 @@ void loop()
 				case Widget::Type::BUTTON:
 					w.button.handler(w);
 			}
+
+			turn_backlight_on = true;
 		}
 
 		if (enc.isTurn())
