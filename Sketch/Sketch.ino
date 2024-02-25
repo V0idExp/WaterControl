@@ -8,6 +8,9 @@
 #define HOUR (MINUTE * 60UL)
 #define DAY (HOUR * 24UL)
 
+// Backlight timeout
+#define BACKLIGHT_TIMEOUT (MINUTE * 2)
+
 // Custom characters, used as widget icons
 #define CLOCK_CHR byte(1)
 #define DROP_CHR byte(2)
@@ -68,6 +71,7 @@ struct EEStore
 
 // Time vars
 unsigned long last_update = 0, now, dt, elapsed_seconds, total_seconds = 0;
+long backlight_remaining_seconds = BACKLIGHT_TIMEOUT;
 
 // Thresholds for time field widgets
 static unsigned long thresholds[] = { DAY, HOUR, MINUTE, SECOND };
@@ -270,6 +274,17 @@ void update_ui()
 			lcd.print(w.button.label);
 		}
 	}
+
+	backlight_remaining_seconds -= elapsed_seconds;
+	if (backlight_remaining_seconds < 0)
+	{
+		lcd.noBacklight();
+		backlight_remaining_seconds = 0;
+	}
+	else
+	{
+		lcd.backlight();
+	}
 }
 
 
@@ -298,6 +313,7 @@ void loop()
 	tick_time();
 
 	bool should_update = elapsed_seconds > 0;
+	bool turn_backlight_on = enc.isTurn() || enc.isClick();
 
 	// check the water level sensor
 	// note: the condition is reset only manually
@@ -382,6 +398,10 @@ void loop()
 
 	if (should_update)
 	{
+		if (turn_backlight_on)
+		{
+			backlight_remaining_seconds = BACKLIGHT_TIMEOUT;
+		}
 		update_ui();
 	}
 }
