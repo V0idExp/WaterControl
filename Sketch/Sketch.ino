@@ -67,7 +67,7 @@ struct EEStore
 };
 
 // Magic byte to ensure existing settings are valid
-#define EEMAGIC 0xbee
+#define EEMAGIC 0xbe1
 
 // Time vars
 unsigned long last_update = 0, now, dt, elapsed_seconds, total_seconds = 0;
@@ -76,10 +76,10 @@ long backlight_remaining_seconds = BACKLIGHT_TIMEOUT;
 // Thresholds for time field widgets
 static unsigned long thresholds[] = { DAY, HOUR, MINUTE, SECOND };
 
-// LCD interface
+// LCD interface (Address, cols, rows)
 LCD_I2C lcd(0x27, 16, 2);
 
-// Encoder interface
+// Encoder interface (A, B, Button)
 EncButton<EB_TICK, 12, 11, 13> enc;
 
 // PWM pin
@@ -197,7 +197,7 @@ void setup()
 	// Serial.begin(9600);
 
 	// load the last feed settings from the EEPROM
-	// load_values_from_eeprom();
+	load_values_from_eeprom();
 
 	// set up the LCD's number of columns and rows:
 	lcd.begin();
@@ -391,8 +391,8 @@ void loop()
 		{
 			ui.state = UI::SELECT;
 			should_update = true;
-			// TODO: uncomment this in production!
-			// save_values_to_eeprom();
+
+			save_values_to_eeprom();
 		}
 	}
 
