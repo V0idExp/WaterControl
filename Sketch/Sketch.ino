@@ -1,6 +1,6 @@
 #include <LCD_I2C.h>
 #include <EEPROM.h>
-#include <EncButton.h>
+// #include <EncButton.h>
 
 // Time constants in seconds
 #define SECOND 1UL
@@ -19,6 +19,7 @@
 #define WATER_CHR byte(5)
 #define STOP_CHR byte(6)
 #define FILL_CHR byte(7)
+
 
 uint8_t clock_char[] = {
 	0x0, 0x0, 0xe, 0x15, 0x17, 0x11, 0xe, 0x0
@@ -48,12 +49,37 @@ uint8_t water_tank_char[] = {
 	0xe, 0x11, 0x1f, 0x1f, 0x1f, 0x1f, 0xe, 0x0
 };
 
+typedef unsigned long seconds;  // seconds
 
-// Feed control vars
-unsigned long feed_period = 1 * MINUTE;
-unsigned long feed_countdown = feed_period;
-unsigned long feed_duration = 7 * SECOND;
-unsigned long feed_intensity = 33;
+/**
+ * Water feed settings (pump on/off cycle and power).
+*/
+struct FeedSettings
+{
+	seconds interval;
+	seconds duration;
+	seconds start;
+	seconds end;
+} feed_settings[2] = {
+	// Day
+	{
+		interval: HOUR * 2,
+		duration: MINUTE * 1,
+		start: HOUR * 9,
+		end: HOUR * 18,
+	},
+	// Night
+	{
+		interval: HOUR * 4,
+		duration: MINUTE * 1,
+		start: HOUR * 18,
+		end: HOUR * 9,
+	},
+};
+
+const FeedSettings *active_phase = &feed_settings[0];
+seconds feed_countdown = 0;
+byte feed_intensity = 100;
 bool feed_active = false;
 bool tank_empty = false;
 
@@ -73,14 +99,14 @@ struct EEStore
 unsigned long last_update = 0, now, dt, elapsed_seconds, total_seconds = 0;
 long backlight_remaining_seconds = BACKLIGHT_TIMEOUT;
 
-// Thresholds for time field widgets
+// Thresholds for seconds field widgets
 static unsigned long thresholds[] = { DAY, HOUR, MINUTE, SECOND };
 
 // LCD interface (Address, cols, rows)
 LCD_I2C lcd(0x27, 16, 2);
 
 // Encoder interface (A, B, Button)
-EncButton<EB_TICK, 12, 11, 13> enc;
+// EncButton<EB_TICK, 12, 11, 13> enc;
 
 // PWM pin
 const int pwm = 10;
@@ -93,36 +119,37 @@ static const char *label_feed = "Feed";
 static const char *label_stop = "Stop";
 static const char *label_fill = "Fill";
 
+struct Pos
+{
+	unsigned col;
+	unsigned row;
+};
+
 struct Widget
 {
 	enum class Type
 	{
+		EMPTY,
 		FIELD,
-		BUTTON
+		BUTTON,
+		LABEL,
 	} type;
 
-	unsigned col;
-	unsigned row;
+	Pos pos;
+
+	struct Field
+	{
+		void *value;
+		unsigned long min;
+		unsigned long max;
+	} field;
+
+	void (*on_update)(Widget &w);
+	void (*on_set)(Widget &w, int increment);
+	void (*on_click)(Widget &w);
 
 	byte icon;
-
-	union
-	{
-		struct Field
-		{
-			unsigned long *value;
-			unsigned long min;
-			unsigned long max;
-			void (*formatter)(char *dst, unsigned long value);
-			void (*setter)(Widget &w, int increment);
-		} field;
-
-		struct Button
-		{
-			const char *label;
-			void (*handler)(Widget &w);
-		} button;
-	};
+	char *label;
 };
 
 struct UI
@@ -132,69 +159,203 @@ struct UI
 		SELECT,
 		EDIT
 	} state = SELECT;
+
 	unsigned selected = 0;
+	unsigned page = 0;
 } ui;
 
-void format_duration(char *dst, unsigned long value);
-void format_percentile(char *dst, unsigned long value);
+void update_duration(Widget &w);
+void update_percentile(Widget &w);
+void update_feed_button(Widget &w);
+void update_time(Widget &w);
 void set_duration(Widget &w, int increment);
 void set_pwm(Widget &w, int increment);
-void toggle_feed(Widget &w);
+void set_time(Widget &w, int increment);
 void toggle_feed(Widget &w);
 void update_feed(unsigned dt);
-void check_sensor();
+
+static const Pos TOP_LEFT = {0, 0};
+static const Pos TOP_MIDDLE = { 5, 0 };
+static const Pos TOP_RIGHT = { 10, 0 };
+static const Pos BOTTOM_LEFT = { 0, 1 };
+static const Pos BOTTOM_MIDDLE = { 5, 1 };
+static const Pos BOTTOM_RIGHT = { 10, 1 };
 
 static Widget widgets[] = {
-	// Feed period
+	/*** FEED SETTINGS ***/
+	// "Day" label
 	{
-		Widget::Type::FIELD,
-		0,
-		0,
-		CLOCK_CHR,
-		{.field={&feed_period, 1, 31 * DAY, format_duration, set_duration}},
+		type: Widget::Type::LABEL,
+		pos: TOP_LEFT,
+		field: {},
+		on_update: nullptr,
+		on_set: nullptr,
+		on_click: nullptr,
+		icon: 0,
+		label: "Day",
+	},
+	// Day start time
+	{
+		type: Widget::Type::FIELD,
+		pos: TOP_MIDDLE,
+		field: {
+			value: &feed_settings[0].start,
+			min: 0UL,
+			max: HOUR * 24,
+		},
+		on_update: update_time,
+		on_set: set_time,
+		on_click: nullptr,
+		icon: 0,
+		label: nullptr,
+	},
+	// Day end time
+	{
+		type: Widget::Type::FIELD,
+		pos: TOP_RIGHT,
+		field: {
+			value: &feed_settings[0].end,
+			min: 0UL,
+			max: HOUR * 24,
+		},
+		on_update: update_time,
+		on_set: set_time,
+		on_click: nullptr,
+		icon: 0,
+		label: nullptr,
+	},
+	// Feed periodicity (interval between feeds)
+	{
+		type: Widget::Type::FIELD,
+		pos: BOTTOM_LEFT,
+		field: {
+			value: &feed_settings[0].interval,
+			min: 1UL,
+			max: 31 * DAY,
+		},
+		on_update: update_duration,
+		on_set: set_duration,
+		on_click: nullptr,
+		icon: CLOCK_CHR,
+		label: nullptr,
 	},
 	// Feed duration
 	{
-		Widget::Type::FIELD,
-		5,
-		0,
-		DROP_CHR,
-		{.field={&feed_duration, 1, HOUR, format_duration, set_duration}},
+		type: Widget::Type::FIELD,
+		pos: BOTTOM_MIDDLE,
+		field: {
+			value: &feed_settings[0].duration,
+			min: 1UL,
+			max: HOUR,
+		},
+		on_update: update_duration,
+		on_set: set_duration,
+		on_click: nullptr,
+		icon: DROP_CHR,
+		label: nullptr,
 	},
-	// Feed toggle button
+	// Empty space
 	{
-		Widget::Type::BUTTON,
-		10,
-		0,
-		WATER_CHR,
-		{.button = {label_feed, toggle_feed}},
+		type: Widget::Type::EMPTY,
+		pos: BOTTOM_RIGHT,
 	},
-	// Feed countdown
-	{
-		Widget::Type::FIELD,
-		0,
-		1,
-		WATCH_CHR,
-		{.field={&feed_countdown, 1, 31 * DAY, format_duration, set_duration}},
-	},
-	// Feed intensity
-	{
-		Widget::Type::FIELD,
-		5,
-		1,
-		VALVE_CHR,
-		{.field={&feed_intensity, 0, 99, format_percentile, set_pwm}},
-	},
+	// // Feed toggle button
+	// {
+	// 	type: Widget::Type::BUTTON,
+	// 	pos: TOP_RIGHT,
+	// 	field: {},
+	// 	on_update: update_feed_button,
+	// 	on_set: nullptr,
+	// 	on_click: toggle_feed,
+	// 	icon: WATER_CHR,
+	// 	label: nullptr,
+	// },
+	// // Feed countdown
+	// {
+	// 	type: Widget::Type::FIELD,
+	// 	pos: BOTTOM_LEFT,
+	// 	field: {
+	// 		value: &feed_settings[0],
+	// 		min: 1UL,
+	// 		max: 31 * DAY
+	// 	},
+	// 	on_update: update_duration,
+	// 	on_set: set_duration,
+	// 	on_click: nullptr,
+	// 	icon: WATCH_CHR,
+	// 	label: nullptr,
+	// },
+	// // Feed intensity
+	// {
+	// 	type: Widget::Type::FIELD,
+	// 	pos: BOTTOM_MIDDLE,
+	// 	field: {
+	// 		value: &day_feed.intensity,
+	// 		min: 0UL,
+	// 		max: 99UL,
+	// 	},
+	// 	on_update: update_percentile,
+	// 	on_set: set_pwm,
+	// 	on_click: nullptr,
+	// 	icon: VALVE_CHR,
+	// 	label: nullptr,
+	// },
+
+	// /*** NIGHT FEED SETTINGS ***/
+	// // Feed periodicity (interval between feeds)
+	// {
+	// 	Widget::Type::FIELD, TOP_LEFT,
+	// 	.field={&day_feed.interval, 1, 31 * DAY},
+	// 	.on_update = update_duration,
+	// 	.on_set = set_duration,
+	// 	.icon = CLOCK_CHR,
+	// },
+	// // Feed duration
+	// {
+	// 	Widget::Type::FIELD, TOP_MIDDLE,
+	// 	.field={&day_feed.duration, 1, HOUR},
+	// 	.on_update = update_duration,
+	// 	.on_set = set_duration,
+	// 	.icon = DROP_CHR,
+	// },
+	// // Feed toggle button
+	// {
+	// 	Widget::Type::BUTTON, TOP_RIGHT,
+	// 	.on_update = update_feed_button,
+	// 	.on_click = toggle_feed,
+	// 	.icon = WATER_CHR,
+	// },
+	// // Feed countdown
+	// {
+	// 	Widget::Type::FIELD, BOTTOM_LEFT,
+	// 	.field={&feed_countdown, 1, 31 * DAY},
+	// 	.on_update = update_duration,
+	// 	.on_set = set_duration,
+	// 	.icon = WATCH_CHR,
+	// },
+	// // Feed intensity
+	// {
+	// 	Widget::Type::FIELD, BOTTOM_MIDDLE,
+	// 	.field={&day_feed.intensity, 0, 99},
+	// 	.on_update = update_percentile,
+	// 	.on_set = set_pwm,
+	// 	.icon = VALVE_CHR,
+	// },
+	// // "Day" label
+	// {
+	// 	Widget::Type::LABEL, BOTTOM_RIGHT,
+	// 	.label = "Day",
+	// },
 };
 
-#define WIDGETS_COUNT (sizeof(widgets) / sizeof(Widget))
-
-Widget &feed_button_widget = widgets[2];
-Widget &feed_countdown_widget = widgets[3];
+static constexpr const int PAGE_SIZE = 16;
+static constexpr const int WIDGETS_COUNT = (sizeof(widgets) / sizeof(Widget));
+static constexpr const int PAGES = WIDGETS_COUNT / PAGE_SIZE;
+static_assert(WIDGETS_COUNT % 6 == 0);
 
 void setup()
 {
-	// Serial.begin(9600);
+	Serial.begin(9600);
 
 	// load the last feed settings from the EEPROM
 	load_values_from_eeprom();
@@ -227,27 +388,21 @@ void update_ui()
 {
 	lcd.clear();
 
-	// feed button update
-	if (tank_empty)
-	{
-		feed_button_widget.icon = FILL_CHR;
-		feed_button_widget.button.label = label_fill;
-
-		lcd.setCursor(11, 1);
-		lcd.print("water");
-	}
-	else
-	{
-		feed_button_widget.icon = feed_active ? STOP_CHR : WATER_CHR;
-		feed_button_widget.button.label = feed_active ? label_stop : label_feed;
-	}
-
-	for (int i = 0; i < WIDGETS_COUNT; i++)
+	// render the widgets of the current page
+	for (int offset = ui.page * PAGE_SIZE, i = offset; i < offset + PAGE_SIZE; i++)
 	{
 		Widget &w = widgets[i];
 
-		lcd.setCursor(w.col, w.row);
+		// update the widget
+		if (w.on_update)
+		{
+			w.on_update(w);
+		}
 
+		// position the cursor on the beginning of the widget region
+		lcd.setCursor(w.pos.col, w.pos.row);
+
+		// render the cursor
 		if (ui.state == UI::SELECT)
 		{
 			lcd.print(i == ui.selected ? '>' : ' ');
@@ -261,20 +416,24 @@ void update_ui()
 			lcd.print(' ');
 		}
 
-		lcd.write(w.icon);
-
-		if (w.type == Widget::Type::FIELD)
+		// render the icon
+		if (w.icon)
 		{
-			char buf[4] = {0};
-			w.field.formatter(buf, *(w.field.value));
-			lcd.print(buf);
+			lcd.write(w.icon);
 		}
-		else if (w.type == Widget::Type::BUTTON)
+		else
 		{
-			lcd.print(w.button.label);
+			lcd.write(' ');
+		}
+
+		// render the label string
+		if (w.label)
+		{
+			lcd.print(w.label);
 		}
 	}
 
+	// tick the backlight
 	backlight_remaining_seconds -= elapsed_seconds;
 	if (backlight_remaining_seconds < 0)
 	{
@@ -309,7 +468,7 @@ void tick_time()
 
 void loop()
 {
-	enc.tick();
+	// enc.tick();
 	tick_time();
 
 	bool should_update = elapsed_seconds > 0;
@@ -325,16 +484,20 @@ void loop()
 
 	update_feed(elapsed_seconds);
 
+	/*
 	if (ui.state == UI::SELECT)
 	{
 		if (enc.isLeft())
 		{
-			if (ui.selected == 0)
+			if (ui.selected % PAGE_SIZE == 0 && ui.page > 0)
 			{
-				ui.selected = WIDGETS_COUNT - 1;
+				// switch to the previous page
+				ui.page--;
+				ui.selected--;
 			}
-			else
+			else if (ui.selected > 0)
 			{
+				// select the previous widget
 				ui.selected--;
 			}
 
@@ -342,11 +505,12 @@ void loop()
 		}
 		else if (enc.isRight())
 		{
-			if (ui.selected == WIDGETS_COUNT - 1)
+			if (ui.selected % PAGE_SIZE == WIDGETS_COUNT - 1 && ui.page < PAGES - 1)
 			{
-				ui.selected = 0;
+				ui.page++;
+				ui.selected++;
 			}
-			else
+			else if (ui.selected < WIDGETS_COUNT - 1)
 			{
 				ui.selected++;
 			}
@@ -365,7 +529,11 @@ void loop()
 					enc.counter = 0;
 					break;
 				case Widget::Type::BUTTON:
-					w.button.handler(w);
+					if (w.on_click)
+					{
+						w.on_click(w);
+					}
+					break;
 			}
 
 			turn_backlight_on = true;
@@ -383,12 +551,9 @@ void loop()
 		{
 			Widget &w = widgets[ui.selected];
 			int increment = (enc.isLeft() ? -1 : 1) * (enc.isFast() ? 5 : 1);
-
-			unsigned long value = *(w.field.value);
-			w.field.setter(w, increment);
-
-			if (value != *(w.field.value))
+			if (w.on_set)
 			{
+				w.on_set(w, increment);
 				should_update = true;
 			}
 		}
@@ -401,6 +566,7 @@ void loop()
 			save_values_to_eeprom();
 		}
 	}
+	*/
 
 	if (should_update)
 	{
@@ -412,25 +578,48 @@ void loop()
 	}
 }
 
-void format_duration(char *dst, unsigned long value)
+void update_duration(Widget &w)
 {
 	static char units[] = {'d', 'h', 'm', 's'};
 	static unsigned long thresholds[] = {DAY, HOUR, MINUTE, SECOND};
+	unsigned long value = *(unsigned long *)w.field.value;
+
+	if (!w.label)
+	{
+		w.label = new char[5];
+	}
 
 	for (int i = 0; i < 4; i++)
 	{
 		if (value >= thresholds[i])
 		{
 			value = ceil(value / (double)thresholds[i]);
-			snprintf(dst, 4, "%02lu%c", value, units[i]);
+			snprintf(w.label, 4, "%02lu%c", value, units[i]);
 			break;
 		}
 	}
 }
 
+void update_time(Widget &w)
+{
+	if (!w.label)
+	{
+		w.label = new char[4];
+	}
+	seconds t = *(seconds*)w.field.value;
+	unsigned hours = t / HOUR;
+	snprintf(w.label, 4, "%02uh", hours);
+}
+
+void set_time(Widget &w, int increment)
+{
+
+}
+
 void set_duration(Widget &w, int increment)
 {
-	unsigned long value = *w.field.value;
+	unsigned long *dst = (unsigned long *)w.field.value;
+	unsigned long value = *dst;
 	int i;
 	for (i = 0; i < 4; i++)
 	{
@@ -478,17 +667,47 @@ void set_duration(Widget &w, int increment)
 		}
 	}
 
-	*(w.field.value) = constrain(value, w.field.min, w.field.max);
+	*dst = constrain(value, w.field.min, w.field.max);
 }
 
-void format_percentile(char *dst, unsigned long value)
+void update_percentile(Widget &w)
 {
-	snprintf(dst, 4, "%02lu%%", value);
+	if (!w.label)
+	{
+		w.label = (char*)malloc(4);
+	}
+	snprintf(w.label, 4, "%02lu%%", *(byte*)w.field.value);
+}
+
+void update_feed_button(Widget &w)
+{
+	if (!w.label)
+	{
+		w.label = (char*)malloc(4);
+	}
+
+	if (tank_empty)
+	{
+		w.icon = FILL_CHR;
+		snprintf(w.label, 4, label_fill);
+	}
+	else
+	{
+		w.icon = feed_active ? STOP_CHR : WATER_CHR;
+		if (feed_active)
+		{
+			snprintf(w.label, 4, label_stop);
+		}
+		else
+		{
+			snprintf(w.label, 4, label_feed);
+		}
+	}
 }
 
 void set_pwm(Widget &w, int increment)
 {
-	unsigned long v = *(w.field.value);
+	unsigned long v = *(unsigned long *)w.field.value;
 	if (increment < 0 && v + increment > v)
 	{
 		// underflow
@@ -504,7 +723,7 @@ void set_pwm(Widget &w, int increment)
 		v += increment;
 	}
 
-	*(w.field.value) = constrain(v, w.field.min, w.field.max);
+	*(unsigned long *)w.field.value = constrain(v, w.field.min, w.field.max);
 
 	update_pwm();
 }
@@ -534,22 +753,21 @@ void update_feed(unsigned dt)
 	{
 		if (feed_countdown > dt)
 		{
-			// some time still left
+			// some seconds still left
 			feed_countdown -= dt;
 		}
 		else
 		{
 			// countdown finished
-
 			if (feed_active)
 			{
 				// feeding finished, stop and switch to countdown
-				feed_countdown = feed_period;
+				feed_countdown = active_phase->interval;
 			}
 			else
 			{
 				// countdown finished, start feeding
-				feed_countdown = feed_duration;
+				feed_countdown = active_phase->duration;
 			}
 			feed_active = !feed_active;
 		}
@@ -562,9 +780,9 @@ void save_values_to_eeprom()
 {
 	EEStore ee = {
 		.magic = EEMAGIC,
-		.feed_period = feed_period,
-		.feed_intensity = feed_intensity,
-		.feed_duration = feed_duration,
+		// .feed_period = feed_period,
+		// .feed_intensity = feed_intensity,
+		// .feed_duration = feed_duration,
 	};
 	EEPROM.put(0, ee);
 }
@@ -576,8 +794,8 @@ void load_values_from_eeprom()
 	EEPROM.get(0, ee);
 	if (ee.magic == EEMAGIC)
 	{
-		feed_period = feed_countdown = ee.feed_period;
-		feed_duration = ee.feed_duration;
-		feed_intensity = ee.feed_intensity;
+		// feed_period = feed_countdown = ee.feed_period;
+		// feed_duration = ee.feed_duration;
+		// feed_intensity = ee.feed_intensity;
 	}
 }
